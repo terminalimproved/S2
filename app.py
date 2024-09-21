@@ -1,101 +1,112 @@
-import os
-import asyncio
-import edge_tts
-import pygame
-import tempfile
 import speech_recognition as sr
-from groq import Groq
+from groq import Groq  # Ensure the library is configured correctly
+import os
+import pygame
+import asyncio
+import pyttsx3
+import threading
+from datetime import datetime
 
-# Initialize the Groq client with the API key
-client = Groq(api_key="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")
-pygame.mixer.init()
-recognizer = sr.Recognizer()
+# Global variable to control the loop
+running = True
 
-async def chat_and_speak():
-    while True:
-        # Use speech recognition to capture audio from the microphone
-        with sr.Microphone() as source:
-            print("Listening...")
-            audio = recognizer.listen(source)
-            print("Processing...")
+# Function to initialize Pygame
+def initialize_services():
+    # Initialize the pygame mixer
+    pygame.mixer.init()
 
-            # Recognize speech using Google Web Speech API
-            try:
-                prompt = recognizer.recognize_google(audio)
-                print("USER:", prompt)
-            except sr.UnknownValueError:
-                print("Sorry, I could not understand the audio.")
-                continue
-            except sr.RequestError as e:
-                print(f"Could not request results from Google Speech Recognition service; {e}")
-                continue
+# Function to play synthesized speech using pyttsx3
+def speak(text):
+    engine = pyttsx3.init()
+    
+    # Set the voice to Microsoft Zira (English)
+    voices = engine.getProperty('voices')
+    for voice in voices:
+        if "Zira" in voice.name:
+            engine.setProperty('voice', voice.id)
+            break
 
-        # Chatbot response using Groq
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "system",
-                    "content": "you are a helpful assistant."
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-            model="llama3-8b-8192",
-            temperature=0.5,
-            max_tokens=1024,
-            top_p=1,
-            stop=None,
-            stream=False,
-        )
-        
-        chatbot_response = chat_completion.choices[0].message.content
+    # Set the text to be spoken
+    engine.say(text)
+    engine.runAndWait()
 
-        # Convert text to audio
-        TEXT = chatbot_response
-        VOICE = "en-GB-SoniaNeural"
-
-        # Create a temporary audio file for the response
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio_file:
-            OUTPUT_FILE = temp_audio_file.name
-
-        # Use edge_tts to generate audio
-        communicate = edge_tts.Communicate(TEXT, VOICE)
-        await communicate.save(OUTPUT_FILE)
-
-        # Load and play the audio file using pygame
-        pygame.mixer.music.load(OUTPUT_FILE)
-        pygame.mixer.music.play()
-
-        # Wait for playback to finish
-        while pygame.mixer.music.get_busy():
-            await asyncio.sleep(1)
-
-        # Clean up
-        pygame.mixer.music.unload()
-        os.remove(OUTPUT_FILE)
-
-async def transcribe_audio():
-    # Specify the path to the audio file for transcription
-    filename = os.path.dirname(__file__) + "/sample_audio.m4a"  # Replace with your audio file!
-
-    # Open the audio file
-    with open(filename, "rb") as file:
-        # Create a transcription of the audio file
-        transcription = client.audio.transcriptions.create(
-            file=(filename, file.read()),  # Required audio file
-            model="distil-whisper-large-v3-en",  # Required model to use for transcription
-            prompt="Specify context or spelling",  # Optional
-            response_format="json",  # Optional
-            language="en",  # Optional
-            temperature=0.0  # Optional
-        )
-        # Print the transcription text
-        print("Transcription:", transcription.text)
-
-# Run the asynchronous functions
+# Main function to capture and recognize speech
 async def main():
-    await asyncio.gather(chat_and_speak(), transcribe_audio())
+    global running    
+    # Initializing services
+    recognizer = sr.Recognizer()
+    initialize_services()
+    
+    client = Groq(api_key="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")
 
-asyncio.run(main())
+    # Adjust for ambient noise once
+    with sr.Microphone() as source:
+        print("Adjusting for ambient noise...") 
+        recognizer.adjust_for_ambient_noise(source, duration=1)
+
+    # Main loop to capture and process voice commands
+    while running:
+        with sr.Microphone() as source:
+            print("Listening for command...")
+            audio = recognizer.listen(source)
+
+        # Try to recognize the text from the speech
+        try:
+            command = recognizer.recognize_google(audio, language='en-US')
+            if not command:
+                raise ValueError("Empty text recognized.")
+        except sr.UnknownValueError:
+            print("I couldn't understand what you said.")
+            command = ""
+        except sr.RequestError as e:
+            print(f"Error in the recognition service request: {e}")
+            command = ""
+
+        # If there is recognized command, continue with generating a response
+        if command:
+            print(f"USER: {command}")
+
+            if command.lower() == "what time is it":
+                current_time = datetime.now().strftime("%H:%M")
+                response = f"The current time is {current_time}."
+                print(response)
+                threading.Thread(target=speak, args=(response,)).start()
+            elif command.lower() == "exit":
+                print("Stopping the program.")
+                threading.Thread(target=speak, args=("Stopping the program.",)).start()
+                running = False
+                break
+            else:
+                try:
+                    chat_completion = client.chat.completions.create(
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "You're a useful assistant called S1. be super-short and polite."
+                            },
+                            {
+                                "role": "user",
+                                "content": command
+                            }
+                        ],
+                        model="llama3-8b-8192",  # Ensure the model is correct
+                        temperature=0.5,
+                        max_tokens=1024,
+                        top_p=1,
+                        stream=False
+                    )
+
+                    chatbot_response = chat_completion.choices[0].message.content
+                    print(chatbot_response)
+
+                    # Call the function to synthesize and play the response
+                    threading.Thread(target=speak, args=(chatbot_response,)).start()
+
+                except Exception as e:
+                    print(f"Error processing the chatbot response: {e}")
+                    threading.Thread(target=speak, args=("Sorry, but there was an error processing your request.",)).start()
+
+# Stop function 
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
